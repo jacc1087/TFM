@@ -119,8 +119,6 @@ python pipeline.py --solo-geo          # Geocodifica direcciones (Nominatim)
 GEMINI_API_KEY=tu_clave_aqui
 ```
 
-Sin `GEMINI_API_KEY` el pipeline funciona en modo heurístico: extrae platos y criterios sin normalización ni validación semántica.
-
 ### Archivos generados
 
 | Archivo | Descripción |
