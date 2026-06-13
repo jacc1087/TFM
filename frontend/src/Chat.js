@@ -811,24 +811,33 @@ export default function Chat() {
               const frases = modalRestaurante.frasesCriterios || {};
               const servicioFrases = modalRestaurante.servicioFrases || "";
               const KEYWORDS_CRITERIO = {
-                mascotas: ["perro","mascota","peludo","admiten","dog","pet","can"],
-                terraza: ["terraza","exterior","aire libre","patio","velador"],
-                vistas: ["vista","panorámica","azotea","rooftop","mirador"],
-                musica_directo: ["música","directo","concierto","actuación","jazz","flamenco","en vivo"],
-                romantico: ["romántico","íntimo","intimo","romantico","pareja","velas","cena romántica"],
-                buen_postre: ["postre","tarta","helado","tiramisú","tiramisu","mousse","brownie","coulant"],
-                precio_calidad: ["precio","calidad","económico","asequible","relación","barato"],
-                grupos_grandes: ["grupo","celebración","cumpleaños","empresa","evento","varios"],
-                vegano_vegetariano: ["vegano","vegana","vegetariano","vegetariana","sin carne","plant"],
-                sin_gluten: ["gluten","celiaco","celiaca","celíaco"],
+                mascotas: ["perro","mascota","peludo","admiten","dog","pet","can","animal"],
+                terraza: ["terraza","exterior","aire libre","patio","velador","fuera"],
+                vistas: ["vista","panorámica","azotea","rooftop","mirador","horizonte"],
+                musica_directo: ["música","directo","concierto","actuación","jazz","flamenco","en vivo","banda"],
+                romantico: ["romántico","íntimo","intimo","romantico","pareja","velas","cena romántica","amor"],
+                buen_postre: ["postre","tarta","helado","tiramisú","tiramisu","mousse","brownie","coulant","flan"],
+                precio_calidad: ["precio","calidad","económico","asequible","relación","barato","razonable"],
+                grupos_grandes: ["grupo","celebración","cumpleaños","empresa","evento","varios","reserva"],
+                vegano_vegetariano: ["vegano","vegana","vegetariano","vegetariana","sin carne","plant","verdura"],
+                sin_gluten: ["gluten","celiaco","celiaca","celíaco","sin gluten"],
               };
               const entradas = Object.entries(frases).filter(([k, v]) => {
+                // Ignorar siempre el criterio de niños (muy propenso a falsos positivos)
                 if (k === "ninos") return false;
-                if (!v || !v.trim() || v.trim().toLowerCase() === "nan" || v.trim().toLowerCase() === "none") return false;
+                // Ignorar frases vacías o inválidas
+                if (!v || !v.trim() || ["nan","none",""].includes(v.trim().toLowerCase())) return false;
+                // Exigir que AL MENOS UNA de las frases (separadas por |) contenga
+                // una keyword del criterio — si ninguna la contiene, es un falso positivo
                 const keywords = KEYWORDS_CRITERIO[k];
                 if (!keywords) return true;
                 const textoLower = v.toLowerCase();
-                return keywords.some(kw => textoLower.includes(kw));
+                const frasesTrozos = textoLower.split("|");
+                // Cada trozo debe contener al menos una keyword para mostrarse
+                const trozosValidos = frasesTrozos.filter(trozo =>
+                  keywords.some(kw => trozo.includes(kw))
+                );
+                return trozosValidos.length > 0;
               });
               if (entradas.length === 0 && !servicioFrases) return null;
               return (
@@ -844,7 +853,14 @@ export default function Chat() {
                       <div style={{ fontSize: 11, color: "#4caf82", fontWeight: 600, marginBottom: 4 }}>
                         {ETIQUETAS[criterio] || criterio}
                       </div>
-                      {texto.split("|").slice(0, 2).map((frase, i) => (
+                      {texto.split("|")
+                        .filter(frase => {
+                          const keywords = KEYWORDS_CRITERIO[criterio];
+                          if (!keywords) return true;
+                          return keywords.some(kw => frase.toLowerCase().includes(kw));
+                        })
+                        .slice(0, 2)
+                        .map((frase, i) => (
                         <div key={i} style={{ fontSize: 12, color: "#888",
                           fontStyle: "italic", lineHeight: 1.5 }}>
                           "{frase.trim().substring(0, 120)}"
