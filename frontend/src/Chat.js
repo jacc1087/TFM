@@ -1,9 +1,39 @@
+/**
+ * Chat.js — Interfaz principal del asistente de restaurantes de Madrid.
+ *
+ * Estructura del archivo:
+ *   1. CONFIGURACIÓN       — URL de la API y constantes
+ *   2. UTILIDADES          — Funciones auxiliares (formateo, historial local)
+ *   3. COMPONENTES UI      — PlatosColapsables, TarjetaRestaurante, MensajeMarkdown,
+ *                            BurbujaMensaje, IndicadorCarga, PanelHistorial
+ *   4. MODAL DE DETALLE    — ModalRestaurante (componente extraído del Chat principal)
+ *   5. CHAT PRINCIPAL      — Componente Chat con estado, lógica y layout
+ */
+
 import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import MapaRestaurantes from "./MapaRestaurantes";
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// 1. CONFIGURACIÓN
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/** URL base del backend FastAPI desplegado en Render. */
 const API_URL = "https://nlp-restaurantes-madrid.onrender.com";
 
+/** Clave para persistir el historial de conversaciones en localStorage. */
+const HISTORIAL_KEY = "restaurantes_madrid_historial";
+
+/** Máximo de sesiones guardadas en el historial local. */
+const MAX_SESIONES = 50;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 2. UTILIDADES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Convierte el rango de precio del backend ("euro euro") al símbolo visual ("€€").
+ */
 function formatearPrecio(rango) {
   if (!rango) return "";
   const mapa = {
@@ -15,9 +45,37 @@ function formatearPrecio(rango) {
   return mapa[rango.toLowerCase().trim()] || rango;
 }
 
+/**
+ * Carga el historial de conversaciones guardado en localStorage.
+ * Devuelve array vacío si no hay nada o si el JSON está corrupto.
+ */
+function cargarHistorialGuardado() {
+  try { return JSON.parse(localStorage.getItem(HISTORIAL_KEY) || "[]"); }
+  catch { return []; }
+}
 
+/**
+ * Guarda una sesión de conversación al inicio del historial local.
+ * Limita el array a MAX_SESIONES entradas para no sobrecargar localStorage.
+ */
+function guardarSesion(sesion) {
+  try {
+    const h = cargarHistorialGuardado();
+    h.unshift(sesion);
+    localStorage.setItem(HISTORIAL_KEY, JSON.stringify(h.slice(0, MAX_SESIONES)));
+  } catch (e) {
+    console.warn("No se pudo guardar historial:", e);
+  }
+}
 
-// ── Platos colapsables ───────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// 3. COMPONENTES UI
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Lista colapsable de platos secundarios.
+ * Muestra un botón "Otras sugerencias (N)" que expande/colapsa el resto de platos.
+ */
 function PlatosColapsables({ platos, frecs, renderChip }) {
   const [abierto, setAbierto] = useState(false);
   return (
@@ -42,190 +100,39 @@ function PlatosColapsables({ platos, frecs, renderChip }) {
   );
 }
 
-// ── Vista compacta con tarjetas ──────────────────────────────────────────────
-function MensajeCompacto({ texto, onVerDetalle, restaurantesData, consulta, restaurantesDelMensaje }) {
-  const lineas = texto.split("\n");
-  const bloques = [];
-  let intro = [];
-  let current = null;
-
-  for (const linea of lineas) {
-    const lineaLimpia = linea.replace(/^[\s·\-*•]+/, "").trim();
-    // Caso 1: ### Nombre  o  **Nombre** solo en la línea
-    const esNombrePuro = lineaLimpia.match(/^#{1,3}\s+(.+)/) || (lineaLimpia.startsWith("**") && lineaLimpia.endsWith("**") && lineaLimpia.length < 60);
-    // Caso 2: **Nombre**, datos...  o  · **Nombre**, datos...
-    const esNombreConDatos = !esNombrePuro && lineaLimpia.match(/^\*\*(.+?)\*\*[,\s]/);
-
-    if (esNombrePuro || esNombreConDatos) {
-      if (current) bloques.push(current);
-      let nombre = "";
-      if (esNombrePuro) {
-        nombre = lineaLimpia.replace(/^#+\s+/, "").replace(/\*\*/g, "").trim();
-      } else {
-        nombre = esNombreConDatos[1].trim();
-      }
-      // Buscar distancia en la última línea de intro
-      const ultimaIntro = intro.length > 0 ? intro[intro.length - 1] : "";
-      const dIntro = ultimaIntro.match(/([\d]+[.,][\d]+)\s*km/i);
-      current = { nombre, lineas: [], valoracion: "", precio: "", distancia: dIntro ? dIntro[1] : "" };
-      const vInline = lineaLimpia.match(/Valoraci[oó]n[^\d]*([\d.]+)/i) || lineaLimpia.match(/valoraci[oó]n\s+([\d.]+)/i) || lineaLimpia.match(/[\s,]([\d]\.[d]+)/);
-      const pInline = lineaLimpia.match(/Rango[^:]*:\s*(€+)/i) || lineaLimpia.match(/(€+)/);
-      const dInline = lineaLimpia.match(/([\d]+[.,][\d]+)\s*km/);
-      if (vInline) current.valoracion = vInline[1];
-      if (pInline) current.precio = pInline[1];
-      if (dInline) current.distancia = dInline[1];
-    } else if (current) {
-      current.lineas.push(linea);
-      const vMatch = linea.match(/Valoraci[oó]n[^\d]*([\d.]+)/i) || linea.match(/valoraci[oó]n\s+([\d.]+)/i) || linea.match(/⭐\s*([\d.]+)/);
-      const pMatch = linea.match(/Rango[^:]*:\s*(€+)/i) || linea.match(/precio[^:]*:\s*(€+)/i);
-      const dMatch = linea.match(/([\d]+[.,][\d]+)\s*km/i);
-      if (vMatch && !current.valoracion) current.valoracion = vMatch[1];
-      if (pMatch && !current.precio) current.precio = pMatch[1];
-      if (dMatch && !current.distancia) current.distancia = dMatch[1];
-    } else {
-      intro.push(linea);
-    }
-  }
-  if (current) bloques.push(current);
-
-  // Fallback: si no hay bloques pero sí restaurantes en ESTE mensaje, construir tarjetas
-  if (bloques.length === 0 && restaurantesDelMensaje && restaurantesDelMensaje.length > 0) {
-    const introTextoFallback = texto.split("\n").slice(0, 2).filter(l => l.trim() && !l.includes("**")).join(" ").trim();
-    return (
-      <div>
-        {introTextoFallback && (
-          <p style={{ fontSize: 13.5, color: "#ccc", lineHeight: 1.6, marginBottom: 14 }}>{introTextoFallback}</p>
-        )}
-        {restaurantesDelMensaje.map((datos, i) => {
-          const bloqueSintetico = { nombre: datos.nombre, valoracion: datos.valoracion, precio: datos.rango_precio, distancia: datos.distancia_km, lineas: [] };
-          return <TarjetaRestaurante key={i} bloque={bloqueSintetico} onVerDetalle={onVerDetalle} restaurantesData={restaurantesData} consulta={consulta} />;
-        })}
-      </div>
-    );
-  }
-
-  if (bloques.length === 0) return <MensajeMarkdown texto={texto} />;
-
-  const introTexto = intro.filter(l => l.trim()).join(" ").trim();
-
-  const abrirModal = (bloque) => {
-    const key = bloque.nombre.toLowerCase();
-    const datos = restaurantesData && restaurantesData[key];
-    if (datos) {
-      // Parsear platos_frecuencia si viene como string JSON
-      let platosFrecuencia = {};
-      try {
-        platosFrecuencia = datos.platos_frecuencia
-          ? (typeof datos.platos_frecuencia === "string"
-            ? JSON.parse(datos.platos_frecuencia)
-            : datos.platos_frecuencia)
-          : {};
-      } catch (e) { platosFrecuencia = {}; }
-
-      let perfilCliente = {};
-      try {
-        perfilCliente = datos.perfil_cliente
-          ? (typeof datos.perfil_cliente === "string"
-            ? JSON.parse(datos.perfil_cliente)
-            : datos.perfil_cliente)
-          : {};
-      } catch (e) { perfilCliente = {}; }
-
-      onVerDetalle({
-        nombre: datos.nombre,
-        valoracion: datos.valoracion,
-        votaciones: datos.votaciones,
-        precio: datos.rango_precio,
-        direccion: datos.direccion,
-        resumen: datos.resumen,
-        positivos: datos.aspectos_positivos || [],
-        negativos: datos.aspectos_negativos || [],
-        platos: datos.platos_destacados || [],
-        platosFrecuencia,
-        perfilCliente,
-        consulta: consulta || "",
-        tokens: datos.tokens || [],
-        dato: datos.dato_curioso || "",
-        badges: [
-          datos.buena_comida && "Buena comida",
-          datos.buen_servicio && "Buen servicio",
-          datos.buen_ambiente && "Buen ambiente",
-          datos.espera_corta && "Servicio rápido",
-          datos.buena_relacion_precio_calidad && "Buena relación calidad-precio",
-          datos.apto_mascotas && "Admite mascotas",
-          datos.terraza_exterior && "Terraza exterior",
-          datos.recomendable_en_pareja && "Romántico",
-          datos.buenas_vistas && "Buenas vistas",
-          datos.acceso_minusvalidos && "Accesible",
-          datos.buen_postre && "Buenos postres",
-          datos.buena_relacion_calidad_precio && "Buena relación calidad-precio",
-          datos.apto_grupos && "Apto para grupos",
-          datos.opciones_veganas && "Opciones veganas",
-          datos.apto_celiaco && "Sin gluten",
-        ].filter(Boolean),
-        avisos: [
-          datos.aviso_espera_larga && "Espera larga",
-          datos.aviso_precio_elevado && "Precio elevado",
-          datos.aviso_servicio_mejorable && "Servicio mejorable",
-        ].filter(Boolean),
-        frasesCriterios: datos.frases_criterios || {},
-        servicioFrases: datos.servicio_frases || "",
-        personalDestacado: datos.personal_destacado || "",
-        resenasDestacadas: datos.resenas_destacadas || "",
-      });
-    } else {
-      const resumenLinea = bloque.lineas.find(l => l.length > 40 && !l.startsWith("#") && !l.toLowerCase().includes("valoraci"));
-      onVerDetalle({
-        nombre: bloque.nombre,
-        valoracion: bloque.valoracion,
-        precio: bloque.precio,
-        resumen: resumenLinea || "",
-        positivos: [],
-        negativos: [],
-        platos: [],
-        dato: "",
-        badges: [],
-      });
-    }
-  };
-
-  return (
-    <div>
-      {introTexto && (
-        <p style={{ fontSize: 13.5, color: "#ccc", marginBottom: 12, lineHeight: 1.6 }}>{introTexto}</p>
-      )}
-      {bloques.map((bloque, i) => (
-        <TarjetaRestaurante key={i} bloque={bloque} onVerDetalle={onVerDetalle} restaurantesData={restaurantesData} consulta={consulta} abrirModal={abrirModal} />
-      ))}
-    </div>
-  );
-}
-
+/**
+ * Tarjeta compacta de restaurante que aparece en el hilo del chat.
+ * Al hacer clic abre el modal de detalle con toda la información del restaurante.
+ */
 function TarjetaRestaurante({ bloque, onVerDetalle, restaurantesData, consulta, abrirModal }) {
-  const palabrasZona = ["cerca", "estoy", "barrio", "zona", "por", "en malasaña", "en chueca", "en lavapiés", "en lavapies", "en salamanca", "en retiro", "en sol", "en chamberi", "en chamberí", "en centro", "en moncloa", "en tetuan", "en tetuán", "en vallecas", "en carabanchel", "en arganzuela", "en latina", "en tetuan"];
+  const palabrasZona = [
+    "cerca", "estoy", "barrio", "zona", "por",
+    "en malasaña", "en chueca", "en lavapiés", "en lavapies", "en salamanca",
+    "en retiro", "en sol", "en chamberi", "en chamberí", "en centro",
+    "en moncloa", "en tetuan", "en tetuán", "en vallecas", "en carabanchel",
+    "en arganzuela", "en latina", "en tetuan",
+  ];
   const consultaLower = (consulta || "").toLowerCase();
   const pidioZona = palabrasZona.some(p => consultaLower.includes(p));
-  const key = bloque.nombre.toLowerCase();
-  const datos = restaurantesData && restaurantesData[key];
+  const key     = bloque.nombre.toLowerCase();
+  const datos   = restaurantesData && restaurantesData[key];
   const distancia = datos?.distancia_km || bloque.distancia;
 
+  /** Abre el modal con los datos completos del restaurante. */
   const handleClick = () => {
     if (abrirModal) {
       abrirModal(bloque);
     } else if (datos) {
-      // fallback cuando se llama desde el bloque sintético
       let platosFrecuencia = {};
-      try { platosFrecuencia = datos.platos_frecuencia ? JSON.parse(datos.platos_frecuencia) : {}; } catch (e) {}
       let perfilCliente = {};
+      try { platosFrecuencia = datos.platos_frecuencia ? JSON.parse(datos.platos_frecuencia) : {}; } catch (e) {}
       try { perfilCliente = datos.perfil_cliente ? JSON.parse(datos.perfil_cliente) : {}; } catch (e) {}
       onVerDetalle({
         nombre: datos.nombre, valoracion: datos.valoracion, votaciones: datos.votaciones,
         precio: datos.rango_precio, direccion: datos.direccion, resumen: datos.resumen,
         positivos: datos.aspectos_positivos || [], negativos: datos.aspectos_negativos || [],
         platos: datos.platos_destacados || [], platosFrecuencia, perfilCliente,
-        consulta: consulta || "",
-        tokens: datos.tokens || [],
-        dato: datos.dato_curioso || "",
+        consulta: consulta || "", tokens: datos.tokens || [], dato: datos.dato_curioso || "",
         badges: [
           datos.buena_comida && "Buena comida", datos.buen_servicio && "Buen servicio",
           datos.buen_ambiente && "Buen ambiente", datos.espera_corta && "Servicio rápido",
@@ -235,8 +142,7 @@ function TarjetaRestaurante({ bloque, onVerDetalle, restaurantesData, consulta, 
           datos.buenas_vistas && "Buenas vistas", datos.acceso_minusvalidos && "Accesible",
           datos.buen_postre && "Buenos postres",
           datos.buena_relacion_calidad_precio && "Buena relación calidad-precio",
-          datos.apto_grupos && "Apto para grupos",
-          datos.opciones_veganas && "Opciones veganas",
+          datos.apto_grupos && "Apto para grupos", datos.opciones_veganas && "Opciones veganas",
           datos.apto_celiaco && "Sin gluten",
         ].filter(Boolean),
         avisos: [
@@ -280,9 +186,11 @@ function TarjetaRestaurante({ bloque, onVerDetalle, restaurantesData, consulta, 
   );
 }
 
-// ── Parsear markdown ligero ────────────────────────────────────────────────────
+/**
+ * Renderiza una línea de texto con soporte básico de markdown:
+ * convierte **texto** en negrita dorada.
+ */
 function parsearLinea(linea, idx) {
-  // Negrita **texto**
   const partes = linea.split(/(\*\*[^*]+\*\*)/g);
   return (
     <span key={idx}>
@@ -295,6 +203,10 @@ function parsearLinea(linea, idx) {
   );
 }
 
+/**
+ * Renderiza texto markdown enriquecido en el hilo del chat:
+ * encabezados ##/###, listas con guiones, separadores, emojis especiales y párrafos.
+ */
 function MensajeMarkdown({ texto }) {
   const lineas = texto.split("\n");
   const elementos = [];
@@ -305,38 +217,28 @@ function MensajeMarkdown({ texto }) {
 
     if (!linea.trim()) {
       elementos.push(<div key={i} style={{ height: 8 }} />);
-      i++;
-      continue;
+      i++; continue;
     }
-
-    // Encabezado ### o ##
     if (linea.startsWith("### ")) {
       elementos.push(
-        <p key={i} style={{ fontFamily: "'DM Serif Display', serif", fontSize: 15, color: "#c8a96e", margin: "14px 0 4px", letterSpacing: "-0.2px" }}>
+        <p key={i} style={{ fontFamily: "'DM Serif Display', serif", fontSize: 15, color: "#c8a96e", margin: "14px 0 4px" }}>
           {linea.slice(4)}
         </p>
       );
-      i++;
-      continue;
+      i++; continue;
     }
     if (linea.startsWith("## ")) {
       elementos.push(
-        <p key={i} style={{ fontFamily: "'DM Serif Display', serif", fontSize: 17, color: "#e8c97e", margin: "16px 0 6px", letterSpacing: "-0.3px" }}>
+        <p key={i} style={{ fontFamily: "'DM Serif Display', serif", fontSize: 17, color: "#e8c97e", margin: "16px 0 6px" }}>
           {linea.slice(3)}
         </p>
       );
-      i++;
-      continue;
+      i++; continue;
     }
-
-    // Separador ---
     if (linea.trim() === "---") {
       elementos.push(<hr key={i} style={{ border: "none", borderTop: "1px solid #2a2a2a", margin: "12px 0" }} />);
-      i++;
-      continue;
+      i++; continue;
     }
-
-    // Lista con - o •
     if (linea.match(/^[-•*]\s/)) {
       const items = [];
       while (i < lineas.length && lineas[i].match(/^[-•*]\s/)) {
@@ -355,34 +257,25 @@ function MensajeMarkdown({ texto }) {
       );
       continue;
     }
-
-    // Línea con emoji al inicio (✅ ⚠️ 💡) — tratar como bloque especial
     const emojiMatch = linea.match(/^([✅⚠️💡🍽️📍⭐])\s*(.*)/u);
     if (emojiMatch) {
-      const colores = { "✅": "#2d6a4f", "⚠️": "#7a5c1e", "💡": "#1e4f6a" };
+      const colores   = { "✅": "#2d6a4f", "⚠️": "#7a5c1e", "💡": "#1e4f6a" };
       const bgColores = { "✅": "#0d2018", "⚠️": "#1e1608", "💡": "#08151e" };
-      const emoji = emojiMatch[1];
+      const emoji     = emojiMatch[1];
       elementos.push(
         <div key={i} style={{
           background: bgColores[emoji] || "#1a1a1a",
           border: `1px solid ${colores[emoji] || "#333"}22`,
           borderLeft: `3px solid ${colores[emoji] || "#c8a96e"}`,
-          borderRadius: "0 8px 8px 0",
-          padding: "8px 12px",
-          margin: "6px 0",
-          fontSize: 13.5,
-          lineHeight: 1.55,
-          color: "#ccc8c0",
+          borderRadius: "0 8px 8px 0", padding: "8px 12px", margin: "6px 0",
+          fontSize: 13.5, lineHeight: 1.55, color: "#ccc8c0",
         }}>
           <span style={{ marginRight: 6 }}>{emoji}</span>
           {parsearLinea(emojiMatch[2], i)}
         </div>
       );
-      i++;
-      continue;
+      i++; continue;
     }
-
-    // Párrafo normal
     elementos.push(
       <p key={i} style={{ margin: "4px 0", fontSize: 13.5, lineHeight: 1.6, color: "#ccc8c0" }}>
         {parsearLinea(linea, i)}
@@ -390,12 +283,136 @@ function MensajeMarkdown({ texto }) {
     );
     i++;
   }
-
   return <div>{elementos}</div>;
 }
 
-// ── Animación de entrada ───────────────────────────────────────────────────────
-function BurbujaMensaje({ mensaje, index, onVerDetalle, restaurantesData, consulta, restaurantesDelMensaje }) {
+/**
+ * Parsea la respuesta de texto del backend y construye tarjetas de restaurante
+ * detectando bloques con formato **Nombre**, seguidos de valoración, precio y distancia.
+ * Si no hay bloques parseables, usa el fallback de restaurantesDelMensaje.
+ */
+function MensajeCompacto({ texto, onVerDetalle, restaurantesData, consulta, restaurantesDelMensaje }) {
+  const lineas  = texto.split("\n");
+  const bloques = [];
+  let intro   = [];
+  let current = null;
+
+  for (const linea of lineas) {
+    const lineaLimpia   = linea.replace(/^[\s·\-*•]+/, "").trim();
+    const esNombrePuro  = lineaLimpia.match(/^#{1,3}\s+(.+)/) || (lineaLimpia.startsWith("**") && lineaLimpia.endsWith("**") && lineaLimpia.length < 60);
+    const esNombreConDatos = !esNombrePuro && lineaLimpia.match(/^\*\*(.+?)\*\*[,\s]/);
+
+    if (esNombrePuro || esNombreConDatos) {
+      if (current) bloques.push(current);
+      let nombre = "";
+      if (esNombrePuro) {
+        nombre = lineaLimpia.replace(/^#+\s+/, "").replace(/\*\*/g, "").trim();
+      } else {
+        nombre = esNombreConDatos[1].trim();
+      }
+      const ultimaIntro = intro.length > 0 ? intro[intro.length - 1] : "";
+      const dIntro = ultimaIntro.match(/([\d]+[.,][\d]+)\s*km/i);
+      current = { nombre, lineas: [], valoracion: "", precio: "", distancia: dIntro ? dIntro[1] : "" };
+      const vInline = lineaLimpia.match(/Valoraci[oó]n[^\d]*([\d.]+)/i);
+      const pInline = lineaLimpia.match(/Rango[^:]*:\s*(€+)/i) || lineaLimpia.match(/(€+)/);
+      const dInline = lineaLimpia.match(/([\d]+[.,][\d]+)\s*km/);
+      if (vInline) current.valoracion = vInline[1];
+      if (pInline) current.precio = pInline[1];
+      if (dInline) current.distancia = dInline[1];
+    } else if (current) {
+      current.lineas.push(linea);
+      const vMatch = linea.match(/Valoraci[oó]n[^\d]*([\d.]+)/i) || linea.match(/⭐\s*([\d.]+)/);
+      const pMatch = linea.match(/Rango[^:]*:\s*(€+)/i) || linea.match(/precio[^:]*:\s*(€+)/i);
+      const dMatch = linea.match(/([\d]+[.,][\d]+)\s*km/i);
+      if (vMatch && !current.valoracion) current.valoracion = vMatch[1];
+      if (pMatch && !current.precio) current.precio = pMatch[1];
+      if (dMatch && !current.distancia) current.distancia = dMatch[1];
+    } else {
+      intro.push(linea);
+    }
+  }
+  if (current) bloques.push(current);
+
+  // Fallback: usar directamente los datos estructurados del mensaje
+  if (bloques.length === 0 && restaurantesDelMensaje && restaurantesDelMensaje.length > 0) {
+    const introTextoFallback = texto.split("\n").slice(0, 2).filter(l => l.trim() && !l.includes("**")).join(" ").trim();
+    return (
+      <div>
+        {introTextoFallback && (
+          <p style={{ fontSize: 13.5, color: "#ccc", lineHeight: 1.6, marginBottom: 14 }}>{introTextoFallback}</p>
+        )}
+        {restaurantesDelMensaje.map((datos, i) => {
+          const bloqueSintetico = { nombre: datos.nombre, valoracion: datos.valoracion, precio: datos.rango_precio, distancia: datos.distancia_km, lineas: [] };
+          return <TarjetaRestaurante key={i} bloque={bloqueSintetico} onVerDetalle={onVerDetalle} restaurantesData={restaurantesData} consulta={consulta} />;
+        })}
+      </div>
+    );
+  }
+
+  if (bloques.length === 0) return <MensajeMarkdown texto={texto} />;
+
+  const introTexto = intro.filter(l => l.trim()).join(" ").trim();
+
+  /** Construye el objeto de detalle y abre el modal para un bloque dado. */
+  const abrirModal = (bloque) => {
+    const key   = bloque.nombre.toLowerCase();
+    const datos = restaurantesData && restaurantesData[key];
+    if (datos) {
+      let platosFrecuencia = {};
+      let perfilCliente = {};
+      try { platosFrecuencia = datos.platos_frecuencia ? (typeof datos.platos_frecuencia === "string" ? JSON.parse(datos.platos_frecuencia) : datos.platos_frecuencia) : {}; } catch (e) {}
+      try { perfilCliente = datos.perfil_cliente ? (typeof datos.perfil_cliente === "string" ? JSON.parse(datos.perfil_cliente) : datos.perfil_cliente) : {}; } catch (e) {}
+      onVerDetalle({
+        nombre: datos.nombre, valoracion: datos.valoracion, votaciones: datos.votaciones,
+        precio: datos.rango_precio, direccion: datos.direccion, resumen: datos.resumen,
+        positivos: datos.aspectos_positivos || [], negativos: datos.aspectos_negativos || [],
+        platos: datos.platos_destacados || [], platosFrecuencia, perfilCliente,
+        consulta: consulta || "", tokens: datos.tokens || [], dato: datos.dato_curioso || "",
+        badges: [
+          datos.buena_comida && "Buena comida", datos.buen_servicio && "Buen servicio",
+          datos.buen_ambiente && "Buen ambiente", datos.espera_corta && "Servicio rápido",
+          datos.buena_relacion_precio_calidad && "Buena relación calidad-precio",
+          datos.apto_mascotas && "Admite mascotas", datos.terraza_exterior && "Terraza exterior",
+          datos.recomendable_en_pareja && "Romántico", datos.buenas_vistas && "Buenas vistas",
+          datos.acceso_minusvalidos && "Accesible", datos.buen_postre && "Buenos postres",
+          datos.buena_relacion_calidad_precio && "Buena relación calidad-precio",
+          datos.apto_grupos && "Apto para grupos", datos.opciones_veganas && "Opciones veganas",
+          datos.apto_celiaco && "Sin gluten",
+        ].filter(Boolean),
+        avisos: [
+          datos.aviso_espera_larga && "Espera larga",
+          datos.aviso_precio_elevado && "Precio elevado",
+          datos.aviso_servicio_mejorable && "Servicio mejorable",
+        ].filter(Boolean),
+        frasesCriterios: datos.frases_criterios || {},
+        servicioFrases: datos.servicio_frases || "",
+        personalDestacado: datos.personal_destacado || "",
+        resenasDestacadas: datos.resenas_destacadas || "",
+      });
+    } else {
+      const resumenLinea = bloque.lineas.find(l => l.length > 40 && !l.startsWith("#") && !l.toLowerCase().includes("valoraci"));
+      onVerDetalle({ nombre: bloque.nombre, valoracion: bloque.valoracion, precio: bloque.precio, resumen: resumenLinea || "", positivos: [], negativos: [], platos: [], dato: "", badges: [] });
+    }
+  };
+
+  return (
+    <div>
+      {introTexto && (
+        <p style={{ fontSize: 13.5, color: "#ccc", marginBottom: 12, lineHeight: 1.6 }}>{introTexto}</p>
+      )}
+      {bloques.map((bloque, i) => (
+        <TarjetaRestaurante key={i} bloque={bloque} onVerDetalle={onVerDetalle} restaurantesData={restaurantesData} consulta={consulta} abrirModal={abrirModal} />
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Burbuja de mensaje del hilo del chat.
+ * Los mensajes del asistente usan MensajeCompacto para parsear restaurantes.
+ * Los mensajes del usuario se muestran en texto simple.
+ */
+function BurbujaMensaje({ mensaje, onVerDetalle, restaurantesData, consulta, restaurantesDelMensaje }) {
   const [visible, setVisible] = useState(false);
   useEffect(() => {
     const t = setTimeout(() => setVisible(true), 40);
@@ -403,12 +420,9 @@ function BurbujaMensaje({ mensaje, index, onVerDetalle, restaurantesData, consul
   }, []);
 
   const esUsuario = mensaje.rol === "usuario";
-
   return (
     <div style={{
-      display: "flex",
-      alignItems: "flex-start",
-      gap: 10,
+      display: "flex", alignItems: "flex-start", gap: 10,
       maxWidth: esUsuario ? "88%" : "96%",
       alignSelf: esUsuario ? "flex-end" : "flex-start",
       flexDirection: esUsuario ? "row-reverse" : "row",
@@ -430,10 +444,8 @@ function BurbujaMensaje({ mensaje, index, onVerDetalle, restaurantesData, consul
         background: esUsuario ? "#c8a96e" : "#161616",
         color: esUsuario ? "#111" : "#e8e4dc",
         border: esUsuario ? "none" : "1px solid #272727",
-        fontSize: 14,
-        lineHeight: 1.6,
-        maxWidth: "100%",
-        width: esUsuario ? "auto" : "100%",
+        fontSize: 14, lineHeight: 1.6,
+        maxWidth: "100%", width: esUsuario ? "auto" : "100%",
       }}>
         {esUsuario
           ? <span style={{ fontWeight: 500 }}>{mensaje.texto}</span>
@@ -444,7 +456,9 @@ function BurbujaMensaje({ mensaje, index, onVerDetalle, restaurantesData, consul
   );
 }
 
-// ── Indicador de carga ────────────────────────────────────────────────────────
+/**
+ * Indicador animado de tres puntos que se muestra mientras el backend responde.
+ */
 function IndicadorCarga() {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, alignSelf: "flex-start" }}>
@@ -455,8 +469,7 @@ function IndicadorCarga() {
       }}>🤖</div>
       <div style={{
         background: "#161616", border: "1px solid #272727",
-        borderRadius: "4px 16px 16px 16px",
-        padding: "14px 18px",
+        borderRadius: "4px 16px 16px 16px", padding: "14px 18px",
         display: "flex", alignItems: "center", gap: 10,
       }}>
         <div style={{ display: "flex", gap: 5 }}>
@@ -474,24 +487,10 @@ function IndicadorCarga() {
   );
 }
 
-// ── Historial persistente ─────────────────────────────────────────────────────
-const HISTORIAL_KEY = "restaurantes_madrid_historial";
-const MAX_SESIONES  = 50;
-
-function cargarHistorialGuardado() {
-  try { return JSON.parse(localStorage.getItem(HISTORIAL_KEY) || "[]"); }
-  catch { return []; }
-}
-
-function guardarSesion(sesion) {
-  try {
-    const h = cargarHistorialGuardado();
-    h.unshift(sesion);
-    localStorage.setItem(HISTORIAL_KEY, JSON.stringify(h.slice(0, MAX_SESIONES)));
-  } catch (e) { console.warn("No se pudo guardar historial:", e); }
-}
-
-// ── Panel de historial ────────────────────────────────────────────────────────
+/**
+ * Panel lateral con el historial de conversaciones guardadas en localStorage.
+ * Permite cargar una sesión anterior o borrar todo el historial.
+ */
 function PanelHistorial({ onCerrar, onCargarSesion }) {
   const sesiones = cargarHistorialGuardado();
 
@@ -561,16 +560,283 @@ function PanelHistorial({ onCerrar, onCargarSesion }) {
   );
 }
 
-// ── App principal ─────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// 4. MODAL DE DETALLE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Keywords que deben aparecer en las frases justificativas de cada criterio.
+ * Si ningún trozo de la frase las contiene, no se muestra esa sección.
+ * Evita mostrar frases irrelevantes asignadas erróneamente por el pipeline.
+ */
+const KEYWORDS_CRITERIO = {
+  mascotas:           ["perro","mascota","peludo","admiten","dog","pet","can","animal"],
+  terraza:            ["terraza","exterior","aire libre","patio","velador","fuera"],
+  vistas:             ["vista","panorámica","azotea","rooftop","mirador","horizonte"],
+  musica_directo:     ["música","directo","concierto","actuación","jazz","flamenco","en vivo","banda"],
+  romantico:          ["romántico","íntimo","intimo","romantico","pareja","velas","cena romántica","amor"],
+  buen_postre:        ["postre","tarta","helado","tiramisú","tiramisu","mousse","brownie","coulant","flan"],
+  precio_calidad:     ["precio","calidad","económico","asequible","relación","barato","razonable"],
+  grupos_grandes:     ["grupo","celebración","cumpleaños","empresa","evento","varios","reserva"],
+  vegano_vegetariano: ["vegano","vegana","vegetariano","vegetariana","sin carne","plant","verdura"],
+  sin_gluten:         ["gluten","celiaco","celiaca","celíaco","sin gluten"],
+};
+
+/** Etiquetas visuales para cada criterio en el modal. */
+const ETIQUETAS_CRITERIO = {
+  mascotas:           "🐾 Admite mascotas",
+  terraza:            "☀️ Terraza",
+  vistas:             "🏙️ Vistas",
+  romantico:          "🕯️ Romántico",
+  musica_directo:     "🎵 Música en directo",
+  buen_postre:        "🍮 Buenos postres",
+  precio_calidad:     "💶 Buena relación calidad-precio",
+  grupos_grandes:     "🎉 Grupos y celebraciones",
+  vegano_vegetariano: "🌿 Opciones veganas",
+  sin_gluten:         "🌾 Sin gluten",
+};
+
+/**
+ * Modal de detalle de un restaurante.
+ * Muestra: nombre, valoración, dirección, badges de criterios, resumen,
+ * frases de clientes por criterio, platos destacados con frecuencia y
+ * aspectos negativos a tener en cuenta.
+ */
+function ModalRestaurante({ restaurante, onCerrar }) {
+  if (!restaurante) return null;
+
+  // Frases de criterios: filtrar las que no tienen keywords relevantes
+  const frases = restaurante.frasesCriterios || {};
+  const entradasFrases = Object.entries(frases).filter(([k, v]) => {
+    if (k === "ninos") return false;
+    if (!v || !v.trim() || ["nan", "none", ""].includes(v.trim().toLowerCase())) return false;
+    const keywords = KEYWORDS_CRITERIO[k];
+    if (!keywords) return true;
+    // Exigir que al menos un trozo contenga una keyword real
+    return v.toLowerCase().split("|").some(trozo => keywords.some(kw => trozo.includes(kw)));
+  });
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, zIndex: 1000,
+      background: "rgba(0,0,0,0.75)", backdropFilter: "blur(4px)",
+      display: "flex", alignItems: "center", justifyContent: "center", padding: 16,
+    }} onClick={onCerrar}>
+      <div style={{
+        background: "#161616", border: "1px solid #2a2a2a",
+        borderRadius: 16, padding: 24, maxWidth: 480, width: "100%",
+        maxHeight: "80vh", overflowY: "auto",
+        boxShadow: "0 20px 60px rgba(0,0,0,0.6)",
+      }} onClick={e => e.stopPropagation()}>
+
+        {/* Cabecera: nombre, valoración, dirección */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontFamily: "'DM Serif Display', serif", fontSize: 20, color: "#f0ece4", marginBottom: 4 }}>
+              {restaurante.nombre}
+            </div>
+            <div style={{ fontSize: 12, color: "#666", display: "flex", gap: 10, flexWrap: "wrap" }}>
+              {restaurante.valoracion > 0 && (
+                <span>⭐ {restaurante.valoracion}{restaurante.votaciones > 0 && ` (${restaurante.votaciones} votos)`}</span>
+              )}
+              {restaurante.precio && <span>{formatearPrecio(restaurante.precio)}</span>}
+            </div>
+            {restaurante.direccion && (
+              <div style={{ fontSize: 11, color: "#444", marginTop: 3 }}>📍 {restaurante.direccion}</div>
+            )}
+          </div>
+          <button onClick={onCerrar} style={{
+            background: "transparent", border: "none", color: "#555",
+            fontSize: 20, cursor: "pointer", padding: "0 4px", flexShrink: 0,
+          }}>✕</button>
+        </div>
+
+        {/* Badges de criterios positivos */}
+        {restaurante.badges && restaurante.badges.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+            {restaurante.badges.map((b, i) => (
+              <span key={i} style={{
+                background: "#0d1f12", border: "1px solid #1a3a20",
+                borderRadius: 12, padding: "3px 10px", fontSize: 11, color: "#4caf82",
+              }}>✓ {b}</span>
+            ))}
+          </div>
+        )}
+
+        {/* Avisos negativos */}
+        {restaurante.avisos && restaurante.avisos.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14 }}>
+            {restaurante.avisos.map((a, i) => (
+              <span key={i} style={{
+                background: "#1f0d0d", border: "1px solid #3a1a1a",
+                borderRadius: 12, padding: "3px 10px", fontSize: 11, color: "#e05555",
+              }}>⚠ {a}</span>
+            ))}
+          </div>
+        )}
+
+        {/* Resumen NLP */}
+        {restaurante.resumen && (
+          <p style={{ fontSize: 13.5, color: "#ccc", lineHeight: 1.65, marginBottom: 14, fontStyle: "italic" }}>
+            "{restaurante.resumen}"
+          </p>
+        )}
+
+        {/* Lo que dicen los clientes — frases reales filtradas por keyword */}
+        {entradasFrases.length > 0 && (
+          <div style={{ marginBottom: 14 }}>
+            <div style={{
+              fontSize: 11, color: "#c8a96e", fontWeight: 600,
+              letterSpacing: "1px", textTransform: "uppercase", marginBottom: 10,
+            }}>
+              Lo que dicen los clientes
+            </div>
+            {entradasFrases.map(([criterio, texto]) => (
+              <div key={criterio} style={{
+                marginBottom: 8, background: "#111", borderRadius: 8,
+                padding: "8px 12px", borderLeft: "2px solid #1a3a20",
+              }}>
+                <div style={{ fontSize: 11, color: "#4caf82", fontWeight: 600, marginBottom: 4 }}>
+                  {ETIQUETAS_CRITERIO[criterio] || criterio}
+                </div>
+                {texto.split("|")
+                  .filter(frase => {
+                    const keywords = KEYWORDS_CRITERIO[criterio];
+                    if (!keywords) return true;
+                    return keywords.some(kw => frase.toLowerCase().includes(kw));
+                  })
+                  .slice(0, 2)
+                  .map((frase, i) => (
+                    <div key={i} style={{ fontSize: 12, color: "#888", fontStyle: "italic", lineHeight: 1.5 }}>
+                      "{frase.trim().substring(0, 120)}"
+                    </div>
+                  ))}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Platos destacados con frecuencia de mención */}
+        {restaurante.platos && restaurante.platos.length > 0 && (() => {
+          const frecs = restaurante.platosFrecuencia || {};
+          const stopwords = ["quiero","comer","busco","estoy","en","cerca","de","un","una","los","las","donde","puedo","hay","con","para","que","me","ir","a","restaurante","haya","buen","buena","buenos"];
+          const palabrasConsulta = (restaurante.tokens && restaurante.tokens.length > 0)
+            ? restaurante.tokens.map(t => t.toLowerCase())
+            : (restaurante.consulta || "").toLowerCase().split(/\s+/).filter(p => p.length > 3 && !stopwords.includes(p));
+
+          const platosOrdenados = [...restaurante.platos].sort((a, b) => {
+            const aEsBuscado = palabrasConsulta.some(p => a.toLowerCase().includes(p));
+            const bEsBuscado = palabrasConsulta.some(p => b.toLowerCase().includes(p));
+            if (aEsBuscado && !bEsBuscado) return -1;
+            if (!aEsBuscado && bEsBuscado) return 1;
+            const keyA = Object.keys(frecs).find(k => k.toLowerCase().includes(a.toLowerCase()) || a.toLowerCase().includes(k.toLowerCase()));
+            const keyB = Object.keys(frecs).find(k => k.toLowerCase().includes(b.toLowerCase()) || b.toLowerCase().includes(k.toLowerCase()));
+            return (frecs[keyB] || 0) - (frecs[keyA] || 0);
+          });
+
+          const platosBuscados = platosOrdenados.filter(p => palabrasConsulta.some(w => p.toLowerCase().includes(w)));
+          const platosResto    = platosOrdenados.filter(p => !palabrasConsulta.some(w => p.toLowerCase().includes(w)));
+          const hayBuscados    = platosBuscados.length > 0;
+
+          /** Renderiza un chip de plato con su frecuencia de mención. */
+          const renderChip = (p, i, destacado) => {
+            const key = Object.keys(frecs).find(k => k.toLowerCase().includes(p.toLowerCase()) || p.toLowerCase().includes(k.toLowerCase()));
+            const n   = key ? frecs[key] : null;
+            return (
+              <span key={i} style={{
+                background: destacado ? "#2a1f00" : "#111",
+                border: destacado ? "1px solid #c8a96e88" : "1px solid #2a2a2a",
+                borderRadius: 10, padding: "4px 12px",
+                fontSize: destacado ? 13 : 12,
+                color: destacado ? "#c8a96e" : "#888",
+                fontWeight: destacado ? 500 : 400,
+              }}>
+                {p}
+                {n ? <span style={{ color: destacado ? "#c8a96eaa" : "#c8a96e55", fontSize: 11, marginLeft: 4 }}>({n}/90 reseñas)</span> : null}
+              </span>
+            );
+          };
+
+          return (
+            <div style={{ background: "#1a1505", borderLeft: "3px solid #c8a96e44", borderRadius: "0 8px 8px 0", padding: "10px 14px", marginBottom: 10 }}>
+              {hayBuscados ? (
+                <>
+                  <div style={{ fontSize: 12, color: "#c8a96e", fontWeight: 500, marginBottom: 8 }}>🍽 Plato buscado</div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: platosResto.length > 0 ? 10 : 0 }}>
+                    {platosBuscados.map((p, i) => renderChip(p, i, true))}
+                  </div>
+                  {platosResto.length > 0 && <PlatosColapsables platos={platosResto} frecs={frecs} renderChip={renderChip} />}
+                </>
+              ) : (
+                <>
+                  <div style={{ fontSize: 12, color: "#c8a96e", fontWeight: 500, marginBottom: 6 }}>🍽 Platos recomendados</div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                    {platosOrdenados.map((p, i) => renderChip(p, i, false))}
+                  </div>
+                </>
+              )}
+            </div>
+          );
+        })()}
+
+        {/* Aspectos negativos a tener en cuenta */}
+        {restaurante.negativos && restaurante.negativos.length > 0 && (
+          <div style={{ background: "#1e1608", borderLeft: "3px solid #7a5c1e", borderRadius: "0 8px 8px 0", padding: "10px 14px", marginBottom: 10 }}>
+            <div style={{ fontSize: 12, color: "#c8963e", fontWeight: 500, marginBottom: 6 }}>⚠️ A tener en cuenta</div>
+            {restaurante.negativos.map((n, i) => (
+              <div key={i} style={{ fontSize: 13, color: "#aaa", marginBottom: 3 }}>· {n}</div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 5. CHAT PRINCIPAL
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Componente principal de la aplicación de chat.
+ * Gestiona el estado global: mensajes, historial API, mapa, modal de detalle
+ * e historial persistente. Orquesta la comunicación con el backend FastAPI.
+ */
 export default function Chat() {
   const navigate = useNavigate();
-  const [mapaRestaurantes, setMapaRestaurantes] = useState([]);
-  const [mostrarMapa, setMostrarMapa] = useState(false);
-  const [modalRestaurante, setModalRestaurante] = useState(null);
-  const [restaurantesData, setRestaurantesData] = useState({});
-  const [mostrarHistorial, setMostrarHistorial] = useState(false);
-  const preguntasSesionRef = useRef([]);
 
+  // Estado del chat
+  const [mensajes, setMensajes] = useState([{
+    rol: "asistente",
+    texto: "¡Hola! Soy tu asistente de restaurantes en Madrid.\n¿Qué tipo de restaurante estás buscando hoy?",
+  }]);
+  const [historial, setHistorial]             = useState([]);  // historial para el API (context window)
+  const [input, setInput]                     = useState("");
+  const [cargando, setCargando]               = useState(false);
+  const [inputFocus, setInputFocus]           = useState(false);
+
+  // Estado del mapa
+  const [mapaRestaurantes, setMapaRestaurantes] = useState([]);
+  const [mostrarMapa, setMostrarMapa]           = useState(false);
+
+  // Estado del modal y datos de restaurantes
+  const [modalRestaurante, setModalRestaurante]   = useState(null);
+  const [restaurantesData, setRestaurantesData]   = useState({});
+
+  // Panel de historial de sesiones
+  const [mostrarHistorial, setMostrarHistorial] = useState(false);
+
+  // Refs
+  const bottomRef            = useRef(null);
+  const inputRef             = useRef(null);
+  const preguntasSesionRef   = useRef([]);
+
+  // Auto-scroll al fondo cuando llega un mensaje nuevo
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [mensajes, cargando]);
+
+  // Procesar consulta inicial pasada desde la Landing page
   const consultaInicial = sessionStorage.getItem("consulta_inicial") || "";
   useEffect(() => {
     if (consultaInicial) {
@@ -580,21 +846,10 @@ export default function Chat() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const [mensajes, setMensajes] = useState([{
-    rol: "asistente",
-    texto: "¡Hola! Soy tu asistente de restaurantes en Madrid.\n¿Qué tipo de restaurante estás buscando hoy?",
-  }]);
-  const [historial, setHistorial] = useState([]);
-  const [input, setInput] = useState("");
-  const [cargando, setCargando] = useState(false);
-  const [inputFocus, setInputFocus] = useState(false);
-  const bottomRef = useRef(null);
-  const inputRef = useRef(null);
-
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [mensajes, cargando]);
-
+  /**
+   * Envía una consulta al backend y procesa la respuesta.
+   * Actualiza mensajes, historial API, datos del mapa y persiste la sesión.
+   */
   const enviar = async (texto) => {
     const consulta = (texto || input).trim();
     if (!consulta || cargando) return;
@@ -613,28 +868,30 @@ export default function Chat() {
         throw new Error(err.detail || `Error ${res.status}`);
       }
       const data = await res.json();
-      const respuesta = data.respuesta || "Sin respuesta del servidor.";
+      const respuesta     = data.respuesta || "Sin respuesta del servidor.";
       const consultaActual = data.consulta_usuario || consulta;
+
+      // Actualizar historial para el contexto del API
       setHistorial(prev => [
         ...prev,
         { role: "user", content: consulta },
         { role: "assistant", content: respuesta },
       ]);
-      // Guardar sesión en historial persistente
+
+      // Persistir sesión en localStorage
       guardarSesion({
-        fecha: new Date().toISOString(),
-        turnos: preguntasSesionRef.current.length,
-        preguntas: [...preguntasSesionRef.current],
-        conversacion: [
-          ...historial,
-          { role: "user", content: consulta },
-          { role: "assistant", content: respuesta },
-        ],
+        fecha:         new Date().toISOString(),
+        turnos:        preguntasSesionRef.current.length,
+        preguntas:     [...preguntasSesionRef.current],
+        conversacion:  [...historial, { role: "user", content: consulta }, { role: "assistant", content: respuesta }],
       });
+
+      // Añadir mensaje al hilo del chat
       setMensajes(prev => [...prev, { rol: "asistente", texto: respuesta, consulta: consultaActual, restaurantes: data.restaurantes || [] }]);
+
+      // Actualizar mapa y datos de restaurantes si hay resultados
       if (data.restaurantes && data.restaurantes.length > 0) {
         setMapaRestaurantes(data.restaurantes);
-        // Reemplazar completo — no acumular datos de búsquedas anteriores
         const nuevo = {};
         data.restaurantes.forEach(r => { nuevo[r.nombre.toLowerCase()] = r; });
         setRestaurantesData(nuevo);
@@ -650,56 +907,68 @@ export default function Chat() {
     }
   };
 
+  /** Reinicia la conversación a su estado inicial. */
+  const nuevaBusqueda = () => {
+    setMensajes([{ rol: "asistente", texto: "¡Hola! ¿Qué tipo de restaurante estás buscando hoy?" }]);
+    setHistorial([]);
+    setMapaRestaurantes([]);
+    setMostrarMapa(false);
+    preguntasSesionRef.current = [];
+  };
+
   const hayConversacion = mensajes.length > 1;
 
   return (
     <div style={s.root}>
-      {/* Header */}
+      {/* Header con navegación y controles */}
       <header style={s.header}>
         <div style={s.headerInner}>
-          <div style={s.logoWrap}>
-            <span style={{ fontSize: 26 }}>🍽</span>
-          </div>
+          <div style={s.logoWrap}><span style={{ fontSize: 26 }}>🍽</span></div>
           <div>
             <div style={s.titulo}>Restaurantes Madrid</div>
             <div style={s.subtitulo}>NLP · nlptown · análisis local</div>
           </div>
         </div>
-        <button style={{ ...s.btnNuevo, marginRight: 8 }} onClick={() => navigate("/")}>← Inicio</button>
-        {mapaRestaurantes.length > 0 && (
-          <button style={{ ...s.btnNuevo, marginRight: 8, borderColor: mostrarMapa ? "#c8a96e" : "#2a2a2a", color: mostrarMapa ? "#c8a96e" : "#666" }}
-            onClick={() => setMostrarMapa(m => !m)}>
-            {mostrarMapa ? "Ocultar mapa" : "Ver mapa"}
-          </button>
-        )}
-        {hayConversacion && (
-          <button
-            style={s.btnNuevo}
-            onClick={() => { setMensajes([{ rol: "asistente", texto: "¡Hola! ¿Qué tipo de restaurante estás buscando hoy?" }]); setHistorial([]); setMapaRestaurantes([]); setMostrarMapa(false); preguntasSesionRef.current = []; }}
-          >
-            Nueva búsqueda
-          </button>
-        )}
+        <div style={{ display: "flex", gap: 8 }}>
+          <button style={s.btnNuevo} onClick={() => navigate("/")}>← Inicio</button>
+          {mapaRestaurantes.length > 0 && (
+            <button
+              style={{ ...s.btnNuevo, borderColor: mostrarMapa ? "#c8a96e" : "#2a2a2a", color: mostrarMapa ? "#c8a96e" : "#666" }}
+              onClick={() => setMostrarMapa(m => !m)}
+            >
+              {mostrarMapa ? "Ocultar mapa" : "Ver mapa"}
+            </button>
+          )}
+          {hayConversacion && (
+            <button style={s.btnNuevo} onClick={nuevaBusqueda}>Nueva búsqueda</button>
+          )}
+          <button style={s.btnNuevo} onClick={() => setMostrarHistorial(true)}>Historial</button>
+        </div>
       </header>
 
-      {/* Chat */}
+      {/* Hilo del chat */}
       <main style={s.chat}>
         {mensajes.map((m, i) => (
-          <BurbujaMensaje key={i} mensaje={m} index={i} onVerDetalle={setModalRestaurante} restaurantesData={restaurantesData} consulta={m.consulta || ""} restaurantesDelMensaje={m.restaurantes || []} />
+          <BurbujaMensaje
+            key={i} mensaje={m} index={i}
+            onVerDetalle={setModalRestaurante}
+            restaurantesData={restaurantesData}
+            consulta={m.consulta || ""}
+            restaurantesDelMensaje={m.restaurantes || []}
+          />
         ))}
         {cargando && <IndicadorCarga />}
         <div ref={bottomRef} />
       </main>
 
-
-
+      {/* Mapa de restaurantes (toggle) */}
       {mostrarMapa && mapaRestaurantes.length > 0 && (
         <div style={{ padding: "0 16px 8px", background: "#0f0f0f" }}>
           <MapaRestaurantes restaurantes={mapaRestaurantes} />
         </div>
       )}
 
-      {/* Input */}
+      {/* Input de texto */}
       <footer style={s.footer}>
         <div style={{
           ...s.inputWrap,
@@ -708,16 +977,13 @@ export default function Chat() {
           transition: "border 0.2s, box-shadow 0.2s",
         }}>
           <input
-            ref={inputRef}
-            style={s.input}
-            value={input}
+            ref={inputRef} style={s.input} value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={e => e.key === "Enter" && !e.shiftKey && enviar()}
             onFocus={() => setInputFocus(true)}
             onBlur={() => setInputFocus(false)}
             placeholder="¿Qué tipo de restaurante buscas?"
-            disabled={cargando}
-            maxLength={300}
+            disabled={cargando} maxLength={300}
           />
           {input.length > 200 && (
             <span style={{ fontSize: 11, color: input.length > 280 ? "#c8a96e" : "#444", flexShrink: 0, marginRight: 4 }}>
@@ -725,303 +991,24 @@ export default function Chat() {
             </span>
           )}
           <button
-            style={{ ...s.boton, opacity: cargando || !input.trim() ? 0.35 : 1, transform: input.trim() ? "scale(1)" : "scale(0.95)", transition: "opacity 0.2s, transform 0.2s" }}
-            onClick={() => enviar()}
-            disabled={cargando || !input.trim()}
-            aria-label="Enviar"
-          >
-            ➤
-          </button>
+            style={{ ...s.boton, opacity: cargando || !input.trim() ? 0.35 : 1, transition: "opacity 0.2s" }}
+            onClick={() => enviar()} disabled={cargando || !input.trim()} aria-label="Enviar"
+          >➤</button>
         </div>
         <p style={s.hint}>Puedes preguntar por cocina, ambiente, platos, barrio o nombre del restaurante</p>
       </footer>
 
-      {modalRestaurante && (
-        <div style={{
-          position: "fixed", inset: 0, zIndex: 1000,
-          background: "rgba(0,0,0,0.75)", backdropFilter: "blur(4px)",
-          display: "flex", alignItems: "center", justifyContent: "center", padding: 16,
-        }} onClick={() => setModalRestaurante(null)}>
-          <div style={{
-            background: "#161616", border: "1px solid #2a2a2a",
-            borderRadius: 16, padding: 24, maxWidth: 480, width: "100%",
-            maxHeight: "80vh", overflowY: "auto",
-            boxShadow: "0 20px 60px rgba(0,0,0,0.6)",
-          }} onClick={e => e.stopPropagation()}>
-            {/* Header */}
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontFamily: "'DM Serif Display', serif", fontSize: 20, color: "#f0ece4", marginBottom: 4 }}>
-                  {modalRestaurante.nombre}
-                </div>
-                <div style={{ fontSize: 12, color: "#666", display: "flex", gap: 10, flexWrap: "wrap" }}>
-                  {modalRestaurante.valoracion > 0 && <span>⭐ {modalRestaurante.valoracion}{modalRestaurante.votaciones > 0 && ` (${modalRestaurante.votaciones} votos)`}</span>}
-                  {modalRestaurante.precio && <span>{formatearPrecio(modalRestaurante.precio)}</span>}
-                </div>
-                {modalRestaurante.direccion && (
-                  <div style={{ fontSize: 11, color: "#444", marginTop: 3 }}>📍 {modalRestaurante.direccion}</div>
-                )}
-              </div>
-              <button onClick={() => setModalRestaurante(null)} style={{
-                background: "transparent", border: "none", color: "#555",
-                fontSize: 20, cursor: "pointer", padding: "0 4px", flexShrink: 0,
-              }}>✕</button>
-            </div>
+      {/* Modal de detalle del restaurante */}
+      <ModalRestaurante restaurante={modalRestaurante} onCerrar={() => setModalRestaurante(null)} />
 
-            {/* Badges positivos */}
-            {modalRestaurante.badges && modalRestaurante.badges.length > 0 && (
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
-                {modalRestaurante.badges.map((b, i) => (
-                  <span key={i} style={{
-                    background: "#0d1f12", border: "1px solid #1a3a20",
-                    borderRadius: 12, padding: "3px 10px", fontSize: 11, color: "#4caf82",
-                  }}>✓ {b}</span>
-                ))}
-              </div>
-            )}
-            {/* Avisos negativos */}
-            {modalRestaurante.avisos && modalRestaurante.avisos.length > 0 && (
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14 }}>
-                {modalRestaurante.avisos.map((a, i) => (
-                  <span key={i} style={{
-                    background: "#1f0d0d", border: "1px solid #3a1a1a",
-                    borderRadius: 12, padding: "3px 10px", fontSize: 11, color: "#e05555",
-                  }}>⚠ {a}</span>
-                ))}
-              </div>
-            )}
-
-            {/* Resumen */}
-            {modalRestaurante.resumen && (
-              <p style={{ fontSize: 13.5, color: "#ccc", lineHeight: 1.65, marginBottom: 14, fontStyle: "italic" }}>
-                "{modalRestaurante.resumen}"
-              </p>
-            )}
-
-            {/* Lo que dicen los clientes — frases reales de reseñas por criterio */}
-            {(() => {
-              const ETIQUETAS = {
-                mascotas: "🐾 Admite mascotas",
-                terraza: "☀️ Terraza", vistas: "🏙️ Vistas", romantico: "🕯️ Romántico",
-                musica_directo: "🎵 Música en directo", buen_postre: "🍮 Buenos postres",
-                precio_calidad: "💶 Buena relación calidad-precio",
-                grupos_grandes: "🎉 Grupos y celebraciones",
-                vegano_vegetariano: "🌿 Opciones veganas", sin_gluten: "🌾 Sin gluten",
-              };
-              const frases = modalRestaurante.frasesCriterios || {};
-              const servicioFrases = modalRestaurante.servicioFrases || "";
-              const KEYWORDS_CRITERIO = {
-                mascotas: ["perro","mascota","peludo","admiten","dog","pet","can","animal"],
-                terraza: ["terraza","exterior","aire libre","patio","velador","fuera"],
-                vistas: ["vista","panorámica","azotea","rooftop","mirador","horizonte"],
-                musica_directo: ["música","directo","concierto","actuación","jazz","flamenco","en vivo","banda"],
-                romantico: ["romántico","íntimo","intimo","romantico","pareja","velas","cena romántica","amor"],
-                buen_postre: ["postre","tarta","helado","tiramisú","tiramisu","mousse","brownie","coulant","flan"],
-                precio_calidad: ["precio","calidad","económico","asequible","relación","barato","razonable"],
-                grupos_grandes: ["grupo","celebración","cumpleaños","empresa","evento","varios","reserva"],
-                vegano_vegetariano: ["vegano","vegana","vegetariano","vegetariana","sin carne","plant","verdura"],
-                sin_gluten: ["gluten","celiaco","celiaca","celíaco","sin gluten"],
-              };
-              const entradas = Object.entries(frases).filter(([k, v]) => {
-                // Ignorar siempre el criterio de niños (muy propenso a falsos positivos)
-                if (k === "ninos") return false;
-                // Ignorar frases vacías o inválidas
-                if (!v || !v.trim() || ["nan","none",""].includes(v.trim().toLowerCase())) return false;
-                // Exigir que AL MENOS UNA de las frases (separadas por |) contenga
-                // una keyword del criterio — si ninguna la contiene, es un falso positivo
-                const keywords = KEYWORDS_CRITERIO[k];
-                if (!keywords) return true;
-                const textoLower = v.toLowerCase();
-                const frasesTrozos = textoLower.split("|");
-                // Cada trozo debe contener al menos una keyword para mostrarse
-                const trozosValidos = frasesTrozos.filter(trozo =>
-                  keywords.some(kw => trozo.includes(kw))
-                );
-                return trozosValidos.length > 0;
-              });
-              if (entradas.length === 0 && !servicioFrases) return null;
-              return (
-                <div style={{ marginBottom: 14 }}>
-                  <div style={{ fontSize: 11, color: "#c8a96e", fontWeight: 600,
-                    letterSpacing: "1px", textTransform: "uppercase", marginBottom: 10 }}>
-                    Lo que dicen los clientes
-                  </div>
-                  {entradas.map(([criterio, texto]) => (
-                    <div key={criterio} style={{ marginBottom: 8,
-                      background: "#111", borderRadius: 8, padding: "8px 12px",
-                      borderLeft: "2px solid #1a3a20" }}>
-                      <div style={{ fontSize: 11, color: "#4caf82", fontWeight: 600, marginBottom: 4 }}>
-                        {ETIQUETAS[criterio] || criterio}
-                      </div>
-                      {texto.split("|")
-                        .filter(frase => {
-                          const keywords = KEYWORDS_CRITERIO[criterio];
-                          if (!keywords) return true;
-                          return keywords.some(kw => frase.toLowerCase().includes(kw));
-                        })
-                        .slice(0, 2)
-                        .map((frase, i) => (
-                        <div key={i} style={{ fontSize: 12, color: "#888",
-                          fontStyle: "italic", lineHeight: 1.5 }}>
-                          "{frase.trim().substring(0, 120)}"
-                        </div>
-                      ))}
-                    </div>
-                  ))}
-
-                </div>
-              );
-            })()}
-
-
-
-            {/* Aspectos positivos */}
-            {modalRestaurante.positivos && modalRestaurante.positivos.length > 0 && (
-              <div style={{ background: "#0d2018", borderLeft: "3px solid #2d6a4f", borderRadius: "0 8px 8px 0", padding: "10px 14px", marginBottom: 10 }}>
-                <div style={{ fontSize: 12, color: "#5a9a70", fontWeight: 500, marginBottom: 6 }}>✅ Lo que destacan los clientes</div>
-                {modalRestaurante.positivos.map((p, i) => (
-                  <div key={i} style={{ fontSize: 13, color: "#aaa", marginBottom: 3 }}>· {p}</div>
-                ))}
-              </div>
-            )}
-
-            {/* Platos */}
-            {modalRestaurante.platos && modalRestaurante.platos.length > 0 && (() => {
-              const frecs = modalRestaurante.platosFrecuencia || {};
-              const stopwords = ["quiero","comer","busco","estoy","en","cerca","de","un","una","los","las","donde","puedo","hay","con","para","que","me","ir","a","restaurante","haya","buen","buena","buenos"];
-              // Usar tokens del backend si están disponibles, si no extraer de la consulta
-              const palabrasConsulta = (modalRestaurante.tokens && modalRestaurante.tokens.length > 0)
-                ? modalRestaurante.tokens.map(t => t.toLowerCase())
-                : (modalRestaurante.consulta || "").toLowerCase().split(/\s+/)
-                    .filter(p => p.length > 3 && !stopwords.includes(p));
-
-              const platosOrdenados = [...modalRestaurante.platos].sort((a, b) => {
-                const aEsBuscado = palabrasConsulta.some(p => a.toLowerCase().includes(p));
-                const bEsBuscado = palabrasConsulta.some(p => b.toLowerCase().includes(p));
-                if (aEsBuscado && !bEsBuscado) return -1;
-                if (!aEsBuscado && bEsBuscado) return 1;
-                const keyA = Object.keys(frecs).find(k => k.toLowerCase().includes(a.toLowerCase()) || a.toLowerCase().includes(k.toLowerCase()));
-                const keyB = Object.keys(frecs).find(k => k.toLowerCase().includes(b.toLowerCase()) || b.toLowerCase().includes(k.toLowerCase()));
-                return (frecs[keyB] || 0) - (frecs[keyA] || 0);
-              });
-
-              const platosBuscados = platosOrdenados.filter(p =>
-                palabrasConsulta.some(w => p.toLowerCase().includes(w))
-              );
-              const platosResto = platosOrdenados.filter(p =>
-                !palabrasConsulta.some(w => p.toLowerCase().includes(w))
-              );
-              const hayBuscados = platosBuscados.length > 0;
-
-              const renderChip = (p, i, destacado) => {
-                const key = Object.keys(frecs).find(k => k.toLowerCase().includes(p.toLowerCase()) || p.toLowerCase().includes(k.toLowerCase()));
-                const n = key ? frecs[key] : null;
-                return (
-                  <span key={i} style={{
-                    background: destacado ? "#2a1f00" : "#111",
-                    border: destacado ? "1px solid #c8a96e88" : "1px solid #2a2a2a",
-                    borderRadius: 10, padding: "4px 12px", fontSize: destacado ? 13 : 12,
-                    color: destacado ? "#c8a96e" : "#888",
-                    fontWeight: destacado ? 500 : 400,
-                  }}>
-                    {p}
-                    {n ? <span style={{ color: destacado ? "#c8a96eaa" : "#c8a96e55", fontSize: 11, marginLeft: 4 }}>({n}/90 reseñas)</span> : null}
-                  </span>
-                );
-              };
-
-              return (
-                <div style={{ background: "#1a1505", borderLeft: "3px solid #c8a96e44", borderRadius: "0 8px 8px 0", padding: "10px 14px", marginBottom: 10 }}>
-                  {hayBuscados ? (
-                    <>
-                      <div style={{ fontSize: 12, color: "#c8a96e", fontWeight: 500, marginBottom: 8 }}>🍽 Plato buscado</div>
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: platosResto.length > 0 ? 10 : 0 }}>
-                        {platosBuscados.map((p, i) => renderChip(p, i, true))}
-                      </div>
-                      {platosResto.length > 0 && (
-                        <PlatosColapsables platos={platosResto} frecs={frecs} renderChip={renderChip} />
-                      )}
-                    </>
-                  ) : (
-                    <>
-                      <div style={{ fontSize: 12, color: "#c8a96e", fontWeight: 500, marginBottom: 6 }}>🍽 Platos recomendados</div>
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                        {platosOrdenados.map((p, i) => renderChip(p, i, false))}
-                      </div>
-                    </>
-                  )}
-                </div>
-              );
-            })()}
-
-            {/* Perfil de cliente — basado en análisis NLP de reseñas reales */}
-            {modalRestaurante.perfilCliente && Object.keys(modalRestaurante.perfilCliente.perfiles || {}).length > 0 && (() => {
-              const perfiles  = modalRestaurante.perfilCliente.perfiles  || {};
-              const momentos  = modalRestaurante.perfilCliente.momentos  || {};
-              const iconos    = { familia: "👨‍👩‍👧", pareja: "💑", amigos: "👥", empresa: "💼", turista: "🌍", solo: "🧍" };
-              const iconosMom = { comida: "☀️", cena: "🌙", brunch: "☕" };
-              return (
-                <div style={{ background: "#0e0e1a", borderLeft: "3px solid #4a4a8a", borderRadius: "0 8px 8px 0", padding: "10px 14px", marginBottom: 10 }}>
-                  <div style={{ fontSize: 12, color: "#8888cc", fontWeight: 500, marginBottom: 8 }}>👤 Perfil de clientes — basado en reseñas reales</div>
-                  {/* Tipos de visita */}
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
-                    {Object.entries(perfiles).map(([tipo, pct], i) => (
-                      <div key={i} style={{
-                        background: "#16162a", border: "1px solid #2a2a4a",
-                        borderRadius: 10, padding: "4px 10px",
-                        display: "flex", alignItems: "center", gap: 5,
-                      }}>
-                        <span style={{ fontSize: 14 }}>{iconos[tipo] || "👤"}</span>
-                        <span style={{ fontSize: 12, color: "#aaa" }}>{tipo.charAt(0).toUpperCase() + tipo.slice(1)}</span>
-                        <span style={{ fontSize: 11, color: "#8888cc", fontWeight: 600 }}>{Math.round(pct * 100)}%</span>
-                      </div>
-                    ))}
-                  </div>
-                  {/* Momentos del día */}
-                  {Object.keys(momentos).length > 0 && (
-                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                      {Object.entries(momentos).map(([momento, pct], i) => (
-                        <div key={i} style={{ fontSize: 11, color: "#666", display: "flex", alignItems: "center", gap: 3 }}>
-                          <span>{iconosMom[momento] || "🕐"}</span>
-                          <span style={{ color: "#555" }}>{momento.charAt(0).toUpperCase() + momento.slice(1)}: </span>
-                          <span style={{ color: "#8888cc" }}>{Math.round(pct * 100)}%</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })()}
-
-            {/* Aspectos negativos */}
-            {modalRestaurante.negativos && modalRestaurante.negativos.length > 0 && (
-              <div style={{ background: "#1e1608", borderLeft: "3px solid #7a5c1e", borderRadius: "0 8px 8px 0", padding: "10px 14px", marginBottom: 10 }}>
-                <div style={{ fontSize: 12, color: "#c8963e", fontWeight: 500, marginBottom: 6 }}>⚠️ A tener en cuenta</div>
-                {modalRestaurante.negativos.map((n, i) => (
-                  <div key={i} style={{ fontSize: 13, color: "#aaa", marginBottom: 3 }}>· {n}</div>
-                ))}
-              </div>
-            )}
-
-            {/* Dato curioso */}
-            {modalRestaurante.dato && (
-              <div style={{ background: "#08151e", borderLeft: "3px solid #1e4f6a", borderRadius: "0 8px 8px 0", padding: "10px 14px", marginTop: 4 }}>
-                <div style={{ fontSize: 12, color: "#5a8aaa", fontWeight: 500, marginBottom: 4 }}>💡 Dato curioso</div>
-                <div style={{ fontSize: 13, color: "#aaa" }}>{modalRestaurante.dato}</div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Panel historial */}
+      {/* Panel lateral de historial de sesiones */}
       {mostrarHistorial && (
         <PanelHistorial
           onCerrar={() => setMostrarHistorial(false)}
           onCargarSesion={(sesion) => {
             setMensajes([
               { rol: "asistente", texto: "¡Hola! Soy tu asistente de restaurantes en Madrid.\n¿Qué tipo de restaurante estás buscando hoy?" },
-              ...sesion.conversacion.map((m, i) => ({
+              ...sesion.conversacion.map(m => ({
                 rol: m.role === "user" ? "usuario" : "asistente",
                 texto: m.content,
               }))
@@ -1049,83 +1036,22 @@ export default function Chat() {
   );
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// ESTILOS
+// ═══════════════════════════════════════════════════════════════════════════════
+
 const s = {
-  root: {
-    display: "flex",
-    flexDirection: "column",
-    height: "100vh",
-    maxWidth: 700,
-    margin: "0 auto",
-    background: "#0f0f0f",
-    color: "#f0ece4",
-  },
-  header: {
-    padding: "14px 20px",
-    borderBottom: "1px solid #1e1e1e",
-    background: "#0f0f0f",
-    position: "sticky",
-    top: 0,
-    zIndex: 10,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-  headerInner: { display: "flex", alignItems: "center", gap: 12 },
-  logoWrap: {
-    width: 42, height: 42, borderRadius: 10,
-    background: "#1a1505", border: "1px solid #c8a96e22",
-    display: "flex", alignItems: "center", justifyContent: "center",
-  },
-  titulo: {
-    fontFamily: "'DM Serif Display', serif",
-    fontSize: 18, color: "#f0ece4", letterSpacing: "-0.3px",
-  },
-  subtitulo: {
-    fontSize: 10, color: "#444", letterSpacing: "0.8px",
-    textTransform: "uppercase", marginTop: 2,
-  },
-  btnNuevo: {
-    background: "transparent", border: "1px solid #2a2a2a",
-    color: "#666", borderRadius: 20, padding: "5px 14px",
-    fontSize: 12, cursor: "pointer",
-  },
-  chat: {
-    flex: 1, overflowY: "auto", padding: "20px 16px",
-    display: "flex", flexDirection: "column", gap: 14,
-  },
-  sugerencias: { background: "#0f0f0f" },
-  sugerenciasInner: {
-    padding: "0 16px 12px",
-    display: "flex", flexWrap: "wrap", gap: 7,
-  },
-  chip: {
-    background: "transparent", border: "1px solid #2a2a2a",
-    color: "#888", borderRadius: 20, padding: "6px 14px",
-    fontSize: 12, cursor: "pointer",
-  },
-  footer: {
-    padding: "10px 16px 16px",
-    borderTop: "1px solid #1e1e1e",
-    background: "#0f0f0f",
-  },
-  inputWrap: {
-    display: "flex", gap: 8, alignItems: "center",
-    background: "#161616", borderRadius: 28,
-    padding: "4px 4px 4px 16px",
-  },
-  input: {
-    flex: 1, background: "transparent", border: "none",
-    color: "#f0ece4", fontSize: 14, outline: "none",
-    padding: "8px 0", fontFamily: "'DM Sans', sans-serif",
-  },
-  boton: {
-    background: "#c8a96e", border: "none", borderRadius: "50%",
-    width: 38, height: 38, fontSize: 14, cursor: "pointer",
-    color: "#111", fontWeight: "bold", flexShrink: 0,
-    display: "flex", alignItems: "center", justifyContent: "center",
-  },
-  hint: {
-    fontSize: 11, color: "#333", textAlign: "center",
-    marginTop: 8, letterSpacing: "0.2px",
-  },
+  root:       { display: "flex", flexDirection: "column", height: "100vh", maxWidth: 700, margin: "0 auto", background: "#0f0f0f", color: "#f0ece4" },
+  header:     { padding: "14px 20px", borderBottom: "1px solid #1e1e1e", background: "#0f0f0f", position: "sticky", top: 0, zIndex: 10, display: "flex", alignItems: "center", justifyContent: "space-between" },
+  headerInner:{ display: "flex", alignItems: "center", gap: 12 },
+  logoWrap:   { width: 42, height: 42, borderRadius: 10, background: "#1a1505", border: "1px solid #c8a96e22", display: "flex", alignItems: "center", justifyContent: "center" },
+  titulo:     { fontFamily: "'DM Serif Display', serif", fontSize: 18, color: "#f0ece4", letterSpacing: "-0.3px" },
+  subtitulo:  { fontSize: 10, color: "#444", letterSpacing: "0.8px", textTransform: "uppercase", marginTop: 2 },
+  btnNuevo:   { background: "transparent", border: "1px solid #2a2a2a", color: "#666", borderRadius: 20, padding: "5px 14px", fontSize: 12, cursor: "pointer" },
+  chat:       { flex: 1, overflowY: "auto", padding: "20px 16px", display: "flex", flexDirection: "column", gap: 14 },
+  footer:     { padding: "10px 16px 16px", borderTop: "1px solid #1e1e1e", background: "#0f0f0f" },
+  inputWrap:  { display: "flex", gap: 8, alignItems: "center", background: "#161616", borderRadius: 28, padding: "4px 4px 4px 16px" },
+  input:      { flex: 1, background: "transparent", border: "none", color: "#f0ece4", fontSize: 14, outline: "none", padding: "8px 0", fontFamily: "'DM Sans', sans-serif" },
+  boton:      { background: "#c8a96e", border: "none", borderRadius: "50%", width: 38, height: 38, fontSize: 14, cursor: "pointer", color: "#111", fontWeight: "bold", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" },
+  hint:       { fontSize: 11, color: "#333", textAlign: "center", marginTop: 8, letterSpacing: "0.2px" },
 };
