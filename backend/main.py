@@ -9,9 +9,7 @@ Modos de uso:
   uvicorn main:app --host 0.0.0.0        → producción (Render)
 
 Archivos necesarios en el mismo directorio:
-  analisis_restaurantes.csv   → generado por analizar_todos_restaurantes.py
-  ranking.csv                 → ranking con Valoracion, Votaciones, Dirección
-  .cache_coords.json          → caché de coordenadas
+  restaurantes.csv   → generado por pipeline.py (unifica analisis + ranking + geo)
 """
 
 import os
@@ -30,10 +28,8 @@ from pydantic import BaseModel
 # CONFIGURACIÓN
 # ═══════════════════════════════════════════════════════════════════════════════
 
-BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
-ARCHIVO_ANALISIS = os.path.join(BASE_DIR, "analisis_restaurantes.csv")
-ARCHIVO_RANKING  = os.path.join(BASE_DIR, "ranking.csv")
-CACHE_COORDS    = os.path.join(BASE_DIR, ".cache_coords.json")
+BASE_DIR           = os.path.dirname(os.path.abspath(__file__))
+ARCHIVO_RESTAURANTES = os.path.join(BASE_DIR, "restaurantes.csv")
 
 SOL_COORDS = (40.4168, -3.7038)  # Puerta del Sol — referencia de centro
 
@@ -118,77 +114,24 @@ def _parsear_platos_frecuencia(top5_str: str) -> dict:
     return result
 
 
-def _cargar_coords() -> dict:
-    """Carga caché de coordenadas generada por generar_agente.py."""
-    if os.path.exists(CACHE_COORDS):
-        try:
-            with open(CACHE_COORDS, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
-
-
 def _cargar_dataframe() -> pd.DataFrame:
     """
-    Carga analisis_restaurantes.csv (Proyecto B) + ranking.csv y combina.
-    Aplica mapeo de columnas para que el frontend React funcione sin cambios.
+    Carga restaurantes.csv — archivo unificado que combina análisis NLP,
+    ranking (Votaciones, Valoracion) y coordenadas geográficas.
+    Generado por pipeline.py antes de desplegar.
     """
-    print(f"Cargando {ARCHIVO_ANALISIS}...")
-    df_nlp = pd.read_csv(ARCHIVO_ANALISIS)
+    print(f"Cargando {ARCHIVO_RESTAURANTES}...")
+    df = pd.read_csv(ARCHIVO_RESTAURANTES)
+    df["id_restaurante"] = df["id_restaurante"].astype(str)
 
-    # Cargar ranking para Valoracion, Votaciones, Dirección
-    df_rank = None
-    if os.path.exists(ARCHIVO_RANKING):
-        try:
-            df_rank = pd.read_csv(ARCHIVO_RANKING, sep=";", skiprows=1)
-            # Detectar columnas disponibles
-            cols_rank = [c for c in ["Id_Restaurante", "Restaurante", "Votaciones", "Valoracion", "Dirección"]
-                         if c in df_rank.columns]
-            df_rank = df_rank[cols_rank]
-            df_rank["Id_Restaurante"] = df_rank["Id_Restaurante"].astype(str)
-            print(f"  ranking.csv cargado: {len(df_rank)} restaurantes")
-        except Exception as e:
-            print(f"  ⚠️  No se pudo cargar ranking.csv: {e}")
-            df_rank = None
+    # Columnas de display para compatibilidad con el resto del código
+    df["nombre_display"]    = df["nombre"]
+    df["votaciones"]        = pd.to_numeric(df.get("votaciones", 0), errors="coerce").fillna(0).astype(int)
+    df["valoracion_display"] = pd.to_numeric(df.get("valoracion_google_ranking", df["valoracion_google"]),
+                                              errors="coerce").fillna(df["valoracion_google"])
+    df["direccion_display"] = df["direccion"].fillna("")
 
-    # Normalizar id en df_nlp
-    df_nlp["id_restaurante"] = df_nlp["id_restaurante"].astype(str)
-
-    # Merge con ranking si está disponible
-    if df_rank is not None:
-        df_rank = df_rank.rename(columns={"Id_Restaurante": "id_restaurante"})
-        df = pd.merge(df_nlp, df_rank, on="id_restaurante", how="left")
-        # El nombre canónico: preferir ranking (más limpio), caer a columna 'nombre' del NLP
-        if "Restaurante" in df.columns:
-            df["nombre_display"] = df["Restaurante"].fillna(df["nombre"])
-        else:
-            df["nombre_display"] = df["nombre"]
-        df["votaciones"] = pd.to_numeric(df.get("Votaciones", 0), errors="coerce").fillna(0).astype(int)
-        df["valoracion_display"] = pd.to_numeric(df.get("Valoracion", df["valoracion_google"]), errors="coerce").fillna(df["valoracion_google"])
-        df["direccion_display"] = df.get("Dirección", df.get("direccion", "")).fillna(df.get("direccion", "")).fillna("")
-    else:
-        df = df_nlp.copy()
-        df["nombre_display"] = df["nombre"]
-        df["votaciones"] = 0
-        df["valoracion_display"] = df["valoracion_google"]
-        df["direccion_display"] = df.get("direccion", "").fillna("")
-
-    # Cargar coordenadas desde caché
-    coords_cache = _cargar_coords()
-    lats, lons = [], []
-    for rid in df["id_restaurante"]:
-        coords = coords_cache.get(str(rid))
-        if coords and isinstance(coords, list) and len(coords) == 2:
-            lats.append(coords[0])
-            lons.append(coords[1])
-        else:
-            lats.append(None)
-            lons.append(None)
-    df["latitud"] = lats
-    df["longitud"] = lons
-
-    # Calcular distancia al centro (Sol)
+    # Calcular distancia al centro (Puerta del Sol)
     def _dist_sol(row):
         if pd.notna(row["latitud"]) and pd.notna(row["longitud"]):
             return _haversine(SOL_COORDS, (row["latitud"], row["longitud"]))
@@ -196,24 +139,22 @@ def _cargar_dataframe() -> pd.DataFrame:
 
     df["dist_sol"] = df.apply(_dist_sol, axis=1)
 
-    # Parsear columnas de criterios booleanos (pueden venir como string "True"/"False")
+    # Parsear criterios booleanos (pueden venir como string "True"/"False")
     for col in ["criterio_ninos", "criterio_mascotas", "criterio_terraza",
                 "criterio_vistas", "criterio_musica_directo", "criterio_romantico",
-                   "criterio_precio_calidad",
-                   "criterio_grupos_grandes", "criterio_vegano_vegetariano",
-                   "criterio_sin_gluten"]:
+                "criterio_precio_calidad", "criterio_grupos_grandes",
+                "criterio_vegano_vegetariano", "criterio_sin_gluten"]:
         if col in df.columns:
-            df[col] = df[col].apply(lambda v: str(v).strip().lower() == "true" if not isinstance(v, bool) else v)
+            df[col] = df[col].apply(lambda v: str(v).strip().lower() == "true"
+                                    if not isinstance(v, bool) else v)
         else:
             df[col] = False
 
-    # Parsear columna todos_platos si existe
     if "todos_platos" not in df.columns and "top5_platos" in df.columns:
         df["todos_platos"] = df["top5_platos"]
 
     print(f"  DataFrame listo: {len(df)} restaurantes")
-    con_coords = df["latitud"].notna().sum()
-    print(f"  Con coordenadas: {con_coords}/{len(df)}")
+    print(f"  Con coordenadas: {df['latitud'].notna().sum()}/{len(df)}")
     return df
 
 
