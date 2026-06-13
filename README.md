@@ -238,7 +238,3 @@ TFM/
 | Mapas | Leaflet · OpenStreetMap |
 | Despliegue backend | Render |
 | Despliegue frontend | Vercel |
-
----
-
-*Proyecto académico · TFM · 2026*
